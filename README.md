@@ -122,7 +122,7 @@ This is a high-level overview. Each step requires careful execution and troubles
     source build/envsetup.sh
     breakfast rosemary
     ```
-    > Watch the codename: rosemary, rosemary_p, maltose, and secret share one device tree but have **distinct** `lineage_<codename>.mk` product files. Picking the wrong one is the #1 way builders brick the modem on these phones.
+    > **One build target, five physical variants.** The rosemary device tree ships a *single* `lineage_rosemary.mk` (the only entry in `AndroidProducts.mk`). All five physical Xiaomi codenames — `rosemary` (Redmi Note 10S NFC, M2101K7BNY), `maltose` (RN10S India, M2101K7BL), `secret` (RN10S Latin America, M2101K7BG), `rosemaryp` (POCO M5s, 2207117BPG), `secretr` (Redmi Note 11 SE, 22087RA4DI) — build from the same `breakfast rosemary` command. `init_rosemary.cpp` detects the running hardware at boot and applies per-variant properties. So you can't pick the "wrong" build target; you'd just get "no such device" if you tried `breakfast secret`. (Where the variant *does* matter: vendor blob extraction in §2.C, stock firmware in §5.)
 3.  **Extract Vendor Blobs** (as described in section 2.C).
 4.  **Build and package the ROM** with `brunch` (combined `lunch` + `mka bacon` + zip):
     ```bash
@@ -167,7 +167,15 @@ export KBUILD_BUILD_TIMESTAMP="$(date -u)"    # set this to a fixed value if you
 
 Three things bite first-time rosemary builders. Internalize them before you flash:
 
-1.  **Codename mismatch bricks the modem.** rosemary, rosemary_p, maltose, and secret share the device tree but have distinct `lineage_<codename>.mk` product files (different baseband / NV partitions). Picking the wrong one in `breakfast` produces a zip that boots but **kills modem firmware loading** — and recovery requires the variant-correct stock fastboot package. Confirm your variant from `Settings → About phone → Model number` against the [variants page](https://wiki.lineageos.org/devices/rosemary/) before building.
+1.  **Wrong-variant *stock firmware* base bricks the modem** (not the wrong build target — there's only one of those). The LineageOS build is one and the same for all five physical variants (see §3 step 2), but the preloader / lk / modem / vbmeta partitions in **stock MIUI** differ per variant. Flashing, say, a `maltose` global MIUI fastboot package onto a `secret` (Latin America) unit before sideloading LineageOS can render the modem unloadable. Always confirm your variant from `Settings → About phone → Model number` against this table before downloading a stock firmware:
+
+    | Model # | Codename | LineageOS wiki page |
+    |---|---|---|
+    | M2101K7BNY | rosemary | [variant1](https://wiki.lineageos.org/devices/rosemary/variant1/) (NFC) or variant2 |
+    | M2101K7BL  | maltose  | variant1 (India, no NFC) |
+    | M2101K7BG  | secret   | [variant3](https://wiki.lineageos.org/devices/rosemary/variant3/) (Latin America) |
+    | 2207117BPG | rosemaryp | [variant4](https://wiki.lineageos.org/devices/rosemary/variant4/) (POCO M5s) |
+    | 22087RA4DI | secretr  | (Redmi Note 11 SE — not officially a rosemary variant) |
 
 2.  **Stock vbmeta will refuse the unsigned boot image.** Before flashing the Lineage `boot.img`, disable verified boot:
     ```bash
