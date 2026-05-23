@@ -159,17 +159,22 @@ System-level logs provide insights into the Android framework, applications, and
 
 `dumpsys` provides diagnostic information about all system services.
 
-*   **List all services**: `adb shell dumpsys`
+*   **List all services**: `adb shell dumpsys -l`
 *   **Dump specific service**: `adb shell dumpsys <service_name>`
-*   **Useful services for debugging**:
-    *   `activity`: ActivityManager (ANR information, running processes, recent tasks)
-    *   `battery`: Battery service state
-    *   `meminfo <package_name>`: Memory usage for a specific application
-    *   `wifi`: Wi-Fi service state
-    *   `power`: Power manager state
-    *   `cpuinfo`: CPU usage statistics
-    *   `SurfaceFlinger`: Graphics and display information
-    *   `thermalservice`: Thermal management status (covered in Section 7)
+*   **High-signal invocations** (the names alone tell you little — these are the actual commands worth knowing):
+    *   `dumpsys activity` — ANR info, running processes, recent tasks (start here for "the app crashed/hung" investigations)
+    *   `dumpsys meminfo <pkg>` — heap/native/graphics memory breakdown for one process
+    *   `dumpsys gfxinfo <pkg> framestats` — **per-frame** vsync/draw/jank measurements over the last ~120 frames; pair with `dumpsys gfxinfo <pkg> reset` to clear before reproducing
+    *   `dumpsys SurfaceFlinger --latency <LayerName>` — frame-level draw latency for a specific window/layer
+    *   `dumpsys SurfaceFlinger --display-id` then `dumpsys SurfaceFlinger` — composition strategy, refresh rate, HDR state
+    *   `dumpsys jobscheduler` — what background work is queued/throttled (essential for "why isn't my work running?")
+    *   `dumpsys deviceidle` — Doze state, whitelist, light/deep idle transitions
+    *   `dumpsys statusbar` — current notification list, status icon set, panel state
+    *   `dumpsys package <pkg>` — install state, declared permissions (granted vs revoked), components, signatures
+    *   `dumpsys procstats --hours 3` — process running totals over a time window (good for battery investigations)
+    *   `dumpsys battery`, `dumpsys power`, `dumpsys cpuinfo`, `dumpsys wifi` — the obvious system-state services
+    *   `dumpsys thermalservice` — covered in Section 7
+    *   `dumpsys overlay` and `cmd overlay list` — runtime resource overlay state (covered in `LineageOS_UI_Customization_SKILL.md`)
 
 ### `bugreport`
 
@@ -246,16 +251,21 @@ The "best way" depends on the problem:
 
 Ensuring logs survive device reboots is critical for debugging boot loops, unexpected shutdowns, or intermittent issues.
 
-*   **Kernel Logs (`ramoops` and `last_kmsg`)**:
-    *   **`ramoops`**: A Linux kernel feature that writes the contents of the kernel log buffer to a reserved region of RAM (which survives warm reboots) before a crash. This data is then exposed via `pstore`.
-        *   **Configuration**: Requires enabling `CONFIG_PSTORE=y`, `CONFIG_PSTORE_CONSOLE=y`, `CONFIG_PSTORE_RAM=y` in your kernel config and configuring a `ramoops` memory region in the device tree source (DTS).
-        *   **Access**:
-            *   `adb root && adb shell ls /sys/fs/pstore/` (look for `console-ramoops`, `dmesg-ramoops`, etc.)
-            *   `adb logcat -b all -L` (will include `ramoops-pmsg` data if configured).
-        *   **Recommendation**: Consider disabling `CONFIG_PSTORE_COMPRESS` for easier reading of raw logs.
-    *   **`last_kmsg`**: Often a symlink or file in `/proc/` that contains the kernel messages from the *previous* boot. This relies on `ramoops` or a similar mechanism.
-        *   **Configuration**: Enabled by kernel configs `CONFIG_ANDROID_RAM_CONSOLE=y` and `CONFIG_ANDROID_RAM_CONSOLE_ENABLE_VERBOSE=y`.
-        *   **Access**: `adb root && adb shell cat /proc/last_kmsg`
+*   **Kernel Logs via `pstore` / `ramoops`** (the modern, canonical mechanism):
+    *   **What it is**: `ramoops` is a Linux kernel facility that mirrors the kernel console buffer to a reserved RAM region that survives warm reboots. After the device comes back up, `pstore` exposes the previous boot's logs as files under `/sys/fs/pstore/`. This is the **only** approach you should be using on rosemary's MTK 4.19 kernel and on any modern AOSP/Lineage tree.
+    *   **Configuration**: Enable `CONFIG_PSTORE=y`, `CONFIG_PSTORE_CONSOLE=y`, `CONFIG_PSTORE_RAM=y` in the kernel config, and reserve a `ramoops` region in the device tree (`reserved-memory { ramoops@<addr> { compatible = "ramoops"; reg = <0x... 0x...>; console-size = <0x40000>; ... }; }`). For easier post-mortem reading, consider building without `CONFIG_PSTORE_COMPRESS`.
+    *   **Where to read after a reboot** (require `adb root`):
+        ```bash
+        adb shell ls /sys/fs/pstore/
+        # console-ramoops-0   ← kernel console output (printk) from previous boot
+        # dmesg-ramoops-0     ← dmesg captured at the crash point
+        # pmsg-ramoops-0      ← userspace pmsg log (if Android `logd` is writing to /dev/pmsg0)
+        adb shell cat /sys/fs/pstore/console-ramoops-0
+        adb shell cat /sys/fs/pstore/dmesg-ramoops-0
+        ```
+    *   `adb logcat -b all -L` also surfaces the prior-boot logd buffers if pstore was wired into pmsg.
+
+> **Legacy note:** older guides (and earlier versions of this doc) tell you to `cat /proc/last_kmsg` or enable `CONFIG_ANDROID_RAM_CONSOLE` / `CONFIG_ANDROID_RAM_CONSOLE_ENABLE_VERBOSE`. **Both were removed from mainline Linux around 3.5 and dropped from Android after Lollipop.** They will silently do nothing on rosemary's kernel. Use the `/sys/fs/pstore/` paths above instead.
 *   **Persistent `logcat` to File**:
     *   Android's default `logcat` buffers are volatile. To make them persistent, you need to redirect them to a file on storage (e.g., `/data` partition).
     *   **Method**: Modify `init.rc` or add a custom `init` service to start `logcat` at boot and redirect its output to a file with rotation.
@@ -362,6 +372,172 @@ The Linux kernel's thermal framework exposes information via `sysfs`.
     (You'll need to identify the relevant `thermal_zone` indices first).
 *   **Logcat During Stress Test**: Run a demanding application or benchmark while capturing `logcat` output, filtering for thermal-related tags.
 *   **Bugreport**: An `adb bugreport` will include the output of `dumpsys thermalservice` and all relevant `logcat`/`dmesg` entries, providing a comprehensive view of the thermal state at the time of generation.
+
+## 8. Modern System Tracing (Perfetto)
+
+`logcat` and `dmesg` tell you *what happened* but not *why it took so long*. For scheduling, binder, GPU, jank, and cross-process latency investigations, the modern tool is **Perfetto** — it superseded `systrace`/`atrace` as the recommended tracing stack starting with Android 10. `systrace` is now formally deprecated.
+
+### On-device capture
+
+The simplest path is the in-OS UI: enable **Developer options → System Tracing**, add the "Record trace" Quick Settings tile, then tap it to start/stop. Traces are written to `/data/local/traces/*.perfetto-trace` and surfaced via a sharable notification. This is the only way to get a trace when ADB isn't available (boot loops, field bug repros).
+
+For ADB-driven captures with full control:
+
+```bash
+# Quick capture (10s, common probes, all apps):
+adb shell perfetto -o /data/misc/perfetto-traces/trace.perfetto-trace \
+    -t 10s -b 32mb -a '*' sched freq idle am wm gfx view binder_driver hal input
+
+# Or use the host helper from AOSP source (gives you a copy locally):
+python3 external/perfetto/tools/record_android_trace \
+    -o ~/trace.perfetto-trace -t 30s -b 64mb \
+    -a com.android.systemui sched freq am wm gfx view binder_driver
+```
+
+### Analysis
+
+Drag the `.perfetto-trace` file into **`https://ui.perfetto.dev`** (runs entirely in-browser — no upload). The UI shows per-CPU scheduling tracks, app/process tracks, frame timeline (jank classified per frame), binder transactions, ftrace events, and an SQL query interface over the trace data via `trace_processor`. For CLI analysis: `trace_processor_shell trace.perfetto-trace` opens a SQL shell.
+
+### atrace (app-level convenience wrapper)
+
+For just userspace ftrace categories without a config file:
+
+```bash
+adb shell atrace --async_start -b 16384 sched gfx view input wm am
+# reproduce the issue ...
+adb shell atrace --async_stop -o /sdcard/atrace.html
+adb pull /sdcard/atrace.html
+```
+
+The output is still openable in `ui.perfetto.dev` (it auto-detects the legacy systrace HTML format).
+
+## 9. CPU Profiling (simpleperf)
+
+`simpleperf` is AOSP's `perf(1)` equivalent — sample-based CPU profiling that works out-of-the-box on `userdebug` builds without extra installs. Lives in `system/extras/simpleperf/`.
+
+```bash
+# Sample CPU cycles with callstacks for a specific app for 30 seconds:
+adb shell simpleperf record -e cpu-cycles -g --duration 30 \
+    --app com.example.myapp -o /data/local/tmp/perf.data
+
+adb pull /data/local/tmp/perf.data
+simpleperf report -i perf.data --sort comm,pid,tid,symbol
+# or, for flamegraphs:
+simpleperf report_sample -i perf.data --show-callchain > sample.txt
+# Then pipe through flamegraph.pl from Brendan Gregg's FlameGraph repo.
+```
+
+The NDK ships an `app_profiler.py` wrapper that handles the record/report/symbolize round-trip in one command — useful when iterating on a real app.
+
+## 10. Native Memory Bug Detection (Scudo & GWP-ASan)
+
+Since Android 11, the default heap allocator on userspace is **Scudo** (hardened allocator that resists most heap exploitation primitives), and AOSP samples a small fraction of allocations through **GWP-ASan** to catch use-after-free and heap-buffer-overflow bugs essentially for free.
+
+To force GWP-ASan on for a particular app (instead of relying on its low sampling rate):
+
+```xml
+<!-- AndroidManifest.xml -->
+<application android:gwpAsanMode="always" ... >
+```
+
+Or at runtime via property:
+
+```bash
+adb shell setprop libc.debug.gwp_asan.process.com.example.myapp 1
+```
+
+Tombstones generated by GWP-ASan-detected bugs include a clear `Cause: [GWP-ASan]: Use After Free, …` annotation and double-free/UAF allocation+deallocation stack traces. Pull from `/data/tombstones/` as documented in §3.
+
+Scudo behavior can be tuned via the `SCUDO_OPTIONS` environment variable (set in `init.rc` for a system service) or a `__scudo_default_options()` function in the binary. Useful flags: `release_to_os_interval_ms=...`, `quarantine_size_kb=...`.
+
+## 11. MediaTek-Specific Debugging (rosemary / MT6785)
+
+rosemary's MT6785 SoC ships an MTK-specific exception/crash collection stack on top of stock Android facilities. Knowing about it saves hours when investigating kernel hangs, modem crashes, or thermal shutdowns that don't produce a normal tombstone.
+
+### AEE (Android Exception Enhancement) — MTK crash collector
+
+The `aee_aed` (userspace) and `aee_aedv` (verbose/system-server) daemons collect kernel exceptions, modem crashes, MTK driver faults, and watchdog timeouts into `/data/aee_exp/` as `db.*` files ("db.log" in MTK parlance). These contain minidumps, register state, and kernel stack traces — often the **only** record of an MTK-driver bug.
+
+```bash
+adb root
+adb shell ls /data/aee_exp/                       # see what's been collected
+adb shell ls /data/aee_exp/db.*/                  # each db.* dir = one event
+adb pull /data/aee_exp/                           # bring them all home
+# Key files inside each db.* dir:
+#   SYS_*_KE              ← kernel exception summary
+#   SWT_*                 ← software watchdog timeout (hung task)
+#   db.*.KE.*             ← full kernel-side dump with stack trace
+#   modem_*.muxz          ← modem crash dump (decompress with mtklog tools)
+```
+
+Relevant kernel configs in rosemary's tree: `CONFIG_MTK_AEE_AED=y`, `CONFIG_MTK_AEE_IPANIC=y`, `CONFIG_MTK_AEE_FEATURE=y`. If you've stripped these in your custom kernel, you've also disabled this collection path — expect "silent reboot, no logs" as the result.
+
+### UART serial console for preloader / lk panics
+
+`ramoops`/`dmesg` only capture output **after** the kernel comes up. If your device panics in the preloader (`preloader_*.bin`), little kernel (`lk.img`), or very early kernel init, none of those facilities are running yet — the device just reboots or hangs with no on-storage trace.
+
+The MT67xx family exposes a 921600-baud TTL UART that is multiplexed onto the USB D+/D− lines as soon as the preloader runs. A "MediaTek debug cable" (CP2102 USB-to-serial with the ID pin shorted to GND, or a commercial one from XDA vendors) attaches to a normal USB port and lets you `screen /dev/ttyUSB0 921600` to capture every byte the SoC emits from power-on.
+
+rosemary's specific UART test points on the PCB are undocumented — disassembly and continuity-testing against the SoC's UART pins is required. See [the XDA MTK UART thread](https://xdaforums.com/t/mediatek-uart-mode-and-how-do-i-access-it.4570933/) for the general procedure.
+
+### GKI vs MTK pre-GKI considerations
+
+rosemary's kernel is the MTK 4.19 vendor fork — **not** a Generic Kernel Image (GKI) tree. Practical implications when reading other AOSP debugging guides:
+
+- `CONFIG_PSTORE_RAM` can be `=y` (compiled in) on rosemary; on GKI devices it must be a vendor module (`=m`), and the `pstore` filesystem mount comes from `vendor_boot` ramdisk.
+- The `ramoops` reserved-memory region is declared in the rosemary device tree at `arch/arm64/boot/dts/mediatek/`; on GKI devices it moves to the vendor DTBO.
+- KMI symbol restrictions (no exporting random symbols to vendor modules) **do not apply** here — you can patch the kernel freely.
+- Future LineageOS branches may move rosemary to a GKI-style split; check `kernel/configs/rosemary/` for `KBUILD_MIXED_TREE` markers if that transition has happened.
+
+## 12. Modern Workflows & Caveats
+
+### Wireless ADB (Android 11+)
+
+The `adb tcpip 5555` flow still works but requires an initial USB connection and has no auth. Since Android 11, prefer the **pairing-based** wireless ADB flow:
+
+1.  On device: **Developer options → Wireless debugging → enable → "Pair device with pairing code"**.
+2.  On host: `adb pair <ip>:<port>` (port from the pairing dialog), enter the 6-digit code.
+3.  Once paired, the device is trusted: `adb connect <ip>:<port>` (the *other* port from the main wireless-debugging screen) on any future session.
+
+### Per-tag log control (controls what reaches `logd`, not just the display filter)
+
+The `TAG:LEVEL` syntax in §3 only filters what `adb logcat` shows you. To change what an app actually *emits* — affecting log buffer pressure and CPU cost — set tag properties:
+
+```bash
+adb shell setprop log.tag.MyServiceTag VERBOSE
+# Reads tested via android.util.Log.isLoggable() will now flip on.
+# Persists across the process lifetime; resets on reboot.
+adb shell setprop persist.log.tag.MyServiceTag VERBOSE   # survives reboot
+```
+
+For high-frequency-log noise control, the **logd allowlist** by UID is also useful:
+
+```bash
+adb logcat --uid=10123                # only this app's logs
+adb shell setprop persist.logd.filter "10123 10456"   # logd drops everything else
+```
+
+### `am compat` — isolate one app-compat behavior change
+
+Each Android version gates new behaviors behind targetSdk-based "compat changes" with numeric IDs. When upgrading an app's targetSdk breaks something, bisect which change is responsible without rebuilding:
+
+```bash
+adb shell am compat enable <CHANGE_ID> com.example.myapp
+adb shell am compat disable <CHANGE_ID> com.example.myapp
+adb shell am compat reset com.example.myapp
+# Find IDs via:
+adb logcat | grep CompatibilityChangeReporter
+# or read frameworks/base/core/java/android/compat/CompatChanges.java
+```
+
+### Magisk / KernelSU interaction during ROM debugging
+
+Most rosemary builds are eventually root'd with Magisk or KernelSU, which changes the behavior you're trying to debug. When bisecting a suspected ROM bug:
+
+- **Disable all modules first.** In recovery: `magisk --remove-modules`. Or `touch /data/adb/modules/<name>/disable` per-module and reboot.
+- **Don't run KernelSU and Magisk simultaneously on the same slot** — their init hooks fight and produce nondeterministic boot behavior that looks like an arbitrary ROM bug.
+- **The Magisk denylist masks SELinux denials.** If you're chasing what looks like a permissions bug, temporarily disable the denylist (`magisk --denylist disable`) so SELinux audits surface in `dmesg` / `logcat`.
+- A boot-loop diagnostic Magisk module ("Boot Logcat & dmesg") writes `/data/adb/modules/BootLogcat/debug-boot-{logcat,dmesg}.log` from very early init — useful when normal `adb logcat` can't connect in time.
 
 ## Conclusion
 

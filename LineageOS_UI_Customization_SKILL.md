@@ -12,10 +12,10 @@ Before attempting any UI customization from source, ensure you have the followin
 
 1.  **AOSP/LineageOS Build Environment**: A fully set up environment capable of compiling Android from source. This typically includes:
     *   A Linux-based operating system (Ubuntu is common).
-    *   Sufficient RAM (min 16GB, 64GB recommended) and disk space (min 250GB, 500GB+ recommended).
-    *   Required build tools and libraries (OpenJDK, `repo`, `git`, `gperf`, `ccache`, etc.). Refer to `source.android.com/docs/setup/start/requirements` for detailed setup.
-2.  **Cloned AOSP/LineageOS Source Tree**: The complete source code for the Android version you intend to modify, synced using the `repo` tool.
-3.  **Basic Android Development Knowledge**: Familiarity with Android app development (activities, services, layouts, resources) and Java/Kotlin.
+    *   Sufficient RAM (min 16GB, 64GB recommended) and disk space (min 300GB, 500GB+ recommended).
+    *   Required build tools and libraries (OpenJDK, `repo`, `git`, `gperf`, `ccache`, etc.). Refer to `source.android.com/docs/setup/start/requirements` and the sibling `README.md` in this repo for a complete Ubuntu 24.04 install line.
+2.  **Cloned AOSP/LineageOS Source Tree**: The complete source for the Android version you intend to modify. **Current rosemary target**: `lineage-23.2` (Android 16 QPR2). Older active branches: `lineage-22.2` (A15 QPR2), `lineage-21` (A14). Note the SystemUI changes documented in §"SystemUI Compose / Scene Framework" below only apply to lineage-22.2+.
+3.  **Basic Android Development Knowledge**: Familiarity with Android app development (activities, services, layouts, resources) and Java/Kotlin. **Jetpack Compose** is required for any SystemUI Shade/QS/Lockscreen work on Android 15+.
 4.  **`adb` (Android Debug Bridge)**: An essential command-line tool for interacting with your device for debugging, flashing, and logging.
 5.  **Target Device**: A device for which you have compiled the AOSP/LineageOS source, ready for flashing modified images. Unlocked bootloader is a must.
 
@@ -106,6 +106,77 @@ RROs are a powerful and relatively non-invasive way to theme or modify resource 
     *   [Troubleshooting RROs](https://source.android.com/docs/core/runtime/rro-troubleshoot)
     *   [Codelab: Create RROs with car-ui-lib components (Automotive, but principles apply)](https://source.android.com/docs/automotive/hmi/car_ui/codelab-rros)
 
+#### Building an RRO with Soong (`runtime_resource_overlay`)
+
+Avoid hand-rolled `Android.mk` for overlays. The modern path is a `runtime_resource_overlay` module in `Android.bp`:
+
+```blueprint
+runtime_resource_overlay {
+    name: "RosemaryAccentOverlay",
+    theme: "RosemaryAccent",
+    sdk_version: "current",
+    product_specific: true,
+    // Critical: keep aapt2 from silently dropping resources
+    // that don't match the target package's resource set.
+    aaptflags: [
+        "--no-resource-deduping",
+        "--no-resource-removal",
+    ],
+}
+```
+
+Without those two `aaptflags`, aapt2 will trim "unused" resources during the overlay build and your overlay may install but silently fail to flip the color it was supposed to flip.
+
+#### `overlay-config.xml` and `overlayable.xml` (Android 11+)
+
+Since Android 11, `android:isStatic` and `android:priority` in the overlay's `AndroidManifest.xml` are **ignored** if the target partition has a `overlay-config.xml`. The newer model:
+
+*   **`overlay-config.xml`** — placed at `<partition>/overlay/config/config.xml`, lists overlays in apply order. Partition precedence: `system < system_ext < product < vendor`. Each entry can set `enabled`, `mutable`, and per-overlay priority. This is now the authoritative source for "which overlays are on at boot."
+*   **`overlayable.xml`** — placed inside the *target* package (e.g. `frameworks/base/core/res/res/values/overlayable.xml`) and declares which resources may be overlaid, gated by `<policy>` (signature / system / vendor / product / odm). An overlay attempting a resource outside its allowed policy is silently rejected at idmap-generation time, which is the most common reason a freshly-installed overlay does nothing.
+
+#### Runtime overlay control with `cmd overlay` and `idmap2`
+
+For iterating on an overlay without flashing or rebooting:
+
+```bash
+adb shell cmd overlay list                     # show every registered overlay and its state
+adb shell cmd overlay enable  com.your.overlay # turn on
+adb shell cmd overlay disable com.your.overlay # turn off
+adb shell cmd overlay enable-exclusive --category com.your.overlay  # for category-grouped themes
+adb shell cmd overlay set-priority com.your.overlay highest
+adb shell cmd overlay dump                     # full state, useful when something isn't applying
+
+# Why isn't my overlay binding to its target?
+adb shell idmap2 dump --idmap-path /data/resource-cache/com.your.overlay@idmap
+# Each line maps target-resource-id → overlay-resource-id. Missing entries mean the
+# `overlayable.xml` policy rejected them.
+```
+
+#### Fabricated RROs (FRROs, Android 12+)
+
+Traditional RROs are APKs you build, install, and toggle. **Fabricated RROs** let a system app (or root) mint an overlay at runtime, set integer/color/dimen/bool/string values, register it, and have it take effect — no APK build, no install, no reboot. This is how Pixel's Material You generates per-wallpaper themes on the fly.
+
+```kotlin
+// Requires android.permission.CHANGE_OVERLAY_PACKAGES, system signature, or shell.
+val builder = FabricatedOverlay.Builder("com.rosemary.dynamictheme", "RosemaryAccent",
+                                         "com.android.systemui")
+builder.setResourceValue("com.android.systemui:color/accent_primary",
+                         TypedValue.TYPE_INT_COLOR_ARGB8, 0xFFE91E63.toInt())
+val overlay = builder.build()
+
+val mgr = context.getSystemService(OverlayManager::class.java)
+val txn = OverlayManagerTransaction.Builder()
+    .registerFabricatedOverlay(overlay)
+    .setEnabled(overlay.identifier, true, userHandle)
+    .build()
+mgr.commit(txn)
+```
+
+Android 12L tightened FRROs to system/root only — third-party apps can no longer mint them. For a LineageOS-side theme engine or a custom Settings preference that recolors SystemUI live, this is the right primitive.
+
+*   [`FabricatedOverlay` reference](https://developer.android.com/reference/android/content/om/FabricatedOverlay)
+*   [`OverlayManagerTransaction` reference](https://developer.android.com/reference/android/content/om/OverlayManagerTransaction)
+
 ### 2. Direct XML Modification
 
 This method involves directly editing the XML resource files within the AOSP/LineageOS source tree. This is powerful for precise changes but requires recompilation and flashing of the affected module.
@@ -157,6 +228,31 @@ This method involves modifying the core Java or Kotlin source files, allowing fo
             *   [SystemUI Quick Settings infrastructure (`qs-tiles.md`)](https://android.googlesource.com/platform/frameworks/base/+/ee8f16377a75/packages/SystemUI/docs/qs-tiles.md)
     *   **Advanced Power Menu**: Modifying the `GlobalActions` dialog within `SystemUI` (e.g., `com.android.systemui.globalactions.GlobalActionsDialogLite.java`) to add options like screenshot, screen recorder, or different reboot modes.
     *   **Status Bar Customizations (Logic)**: Implementing network traffic monitors, custom clock formats, or dynamic battery styles often requires Java/Kotlin code to fetch data and update the UI.
+
+#### SystemUI Compose & the Scene Framework ("Flexiglass") — Android 15+
+
+Starting with Android 15 (LineageOS 22.2), large parts of SystemUI are migrating from XML+View hierarchies to **Jetpack Compose** organized around a new "Scene Framework". The Shade, Quick Settings, Lockscreen, and Notification stack are being progressively re-implemented under `packages/SystemUI/compose/{facade,features,scene}/`. If you're targeting lineage-22.2 or later, much of the XML-modification guidance above no longer applies to those surfaces.
+
+Key landmarks once you `cd packages/SystemUI`:
+
+*   `compose/scene/src/com/android/compose/animation/scene/SceneContainer.kt` — the host composable that swaps between scenes (Lockscreen ↔ Bouncer ↔ Shade ↔ QuickSettings)
+*   `compose/facade/enabled/...` vs `compose/facade/disabled/...` — `aconfig`-gated dual implementations; the build system picks one based on flag state
+*   `aconfig/scene_container_flag.aconfig` and `aconfig/notifications_flags.aconfig` — the on/off switches for the new surfaces
+
+The relevant `aconfig` flags can be flipped at runtime (on `userdebug` builds, without rebuilding) for A/B testing:
+
+```bash
+adb shell device_config override systemui com.android.systemui.scene_container true
+adb shell device_config override systemui com.android.systemui.notifications_heads_up_refactor true
+# List what's currently overridden:
+adb shell device_config list systemui | grep -E 'compose|scene|refactor'
+# Required after most flag flips: kill SystemUI to pick up the change.
+adb shell killall com.android.systemui
+```
+
+When patching Compose UI in SystemUI, the workflow is `m SystemUI && adb install -r out/.../SystemUI.apk && adb shell killall com.android.systemui` — same as XML-era patching, but the *what you edit* moves from `res/layout/*.xml` to `compose/.../*.kt`.
+
+Reference: [SystemUI Scene Framework design doc](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/packages/SystemUI/docs/scene.md).
 
 ### 2. Adding New Settings/Features to the `Settings` Application
 
@@ -218,7 +314,105 @@ Custom ROMs often integrate unique features into the central `Settings` applicat
     4.  **Integrate into Settings Hierarchy**:
         *   Add your new fragment to an existing `PreferenceScreen` in `Settings` (e.g., `res/xml/dashboard_tiles_default.xml` or specific category XMLs).
         *   This typically involves adding a new `<Preference>` tag with `android:fragment` pointing to your new `CustomFeaturesFragment` class.
-    5.  **Persist Settings**: For system-wide features, use `Settings.System`, `Settings.Secure`, or `Settings.Global` to store and retrieve values. LineageOS often has its own `LineageSettings` provider.
+    5.  **Persist Settings**: For system-wide features, use `Settings.System`, `Settings.Secure`, or `Settings.Global` to store and retrieve values. LineageOS provides its own `LineageSettings` provider — see the LineageOS-specific section below for when to use it.
+
+## Customization Techniques - Material You / Dynamic Color
+
+Since Android 12, every system color (accent, neutral, surface, on-surface, etc.) is generated at runtime from the user's wallpaper via the **Monet** color extraction engine. If you're theming SystemUI / Settings / launcher on a modern target, you are working *with* this pipeline — not replacing it.
+
+### Pipeline overview
+
+```
+WallpaperManager
+     │ (current wallpaper bitmap)
+     ▼
+WallpaperColors                      ← extracts up to 3 dominant colors
+     │
+     ▼
+com.android.systemui.monet.ColorScheme         ← seeds material color spec
+     │
+     ▼
+accent1[0..10], accent2[0..10], accent3[0..10] ← 13 shades each
+neutral1[0..10], neutral2[0..10]
+     │
+     ▼
+ThemeOverlayController                ← creates Fabricated RROs targeting
+                                         framework + SystemUI + Settings
+     │
+     ▼
+OverlayManagerService                 ← applies overlays to running system
+```
+
+The `ThemeOverlayController` in `packages/SystemUI/src/com/android/systemui/theme/` watches `WallpaperManager` and `Settings.Secure.THEME_CUSTOMIZATION_OVERLAY_PACKAGES`, then commits an `OverlayManagerTransaction` of fabricated overlays — the same FRRO machinery covered above. To customize:
+
+*   **Substitute a different color extractor** — replace `ColorScheme.getSeedColors()` (e.g., to pull from album art, time of day, or a user picker) and the rest of the pipeline keeps working.
+*   **Change the palette generation algorithm** — `ColorScheme` uses the AOSP port of Material Color Utilities (HCT color space). Forks like `monet-engine` or LineageOS's accent picker plug in here.
+*   **Disable Monet** (e.g., to ship a fixed dark theme) — set `flag_monet` to `false` in `packages/SystemUI/res/values/flags.xml` or override via `device_config`.
+
+Reference: [AOSP — Implement Dynamic Color](https://source.android.com/docs/core/display/dynamic-color).
+
+## LineageOS-Specific UI Infrastructure
+
+Vanilla AOSP documentation often steers you toward `frameworks/base` patches and `Settings.System` keys. LineageOS has parallel infrastructure that you should prefer when shipping Lineage-side features — using it makes your changes survive upstream merges and gives you a clean integration point with the LineageOS Settings UI.
+
+### `LineageSettings` provider (use it instead of `Settings.System` for Lineage-only keys)
+
+LineageOS ships `org.lineageos.platform.internal` providers that expose `LineageSettings.System`, `LineageSettings.Secure`, and `LineageSettings.Global` — same API surface as AOSP's `Settings`, separate storage. Use these for any setting that exists *only* on LineageOS so you're not polluting the AOSP namespace (and so your setting survives if AOSP later defines a key with the same name):
+
+```java
+import lineageos.providers.LineageSettings;
+
+// Write:
+LineageSettings.System.putInt(getContentResolver(),
+    LineageSettings.System.NETWORK_TRAFFIC_MODE, mode);
+
+// Read:
+int mode = LineageSettings.System.getIntForUser(getContentResolver(),
+    LineageSettings.System.NETWORK_TRAFFIC_MODE, 0, UserHandle.USER_CURRENT);
+```
+
+The schema (and validator entries) live in `vendor/lineage/lineage-sdk/src/java/lineageos/providers/LineageSettings.java`. New keys require an entry there plus a migration in `LineageDatabaseHelper`.
+
+### `lineage-sdk` Styles API
+
+For accent / style toggles specifically, `lineageos.style.StyleInterface` exposes a higher-level API on top of OverlayManager — `getTrustedAccents()`, `setAccent()`, `getStyle()` — that the LineageOS Settings accent picker uses. Hooking into this rather than calling `OverlayManager` directly means your custom accents auto-appear in the existing Settings UI.
+
+### `LineageParts` (the home for Lineage-side settings UI)
+
+`packages/apps/LineageParts/` is LineageOS's parallel-to-`Settings` app for Lineage-specific preferences (status bar tweaks, gesture navigation extras, button remapping, etc.). When adding a new Lineage-side feature toggle, add the preference fragment here — *not* in `packages/apps/Settings/`. The main Settings app surfaces LineageParts entries automatically through the `<lineage-additional-settings>` mechanism.
+
+### Trebuchet (not Launcher3) is the launcher
+
+LineageOS ships `packages/apps/Trebuchet/` — a Launcher3 + Quickstep fork with grid/icon-pack/feed deltas. **Launcher patches should be rebased onto Trebuchet, not vanilla Launcher3.** Quickstep gestures (the recents/overview animation logic) live in the same tree. If you're following an AOSP Launcher3 customization tutorial, the file paths usually translate directly to Trebuchet, but the upstream Lineage commits ahead of the AOSP `Launcher3` history may have already done what the tutorial is asking for.
+
+### Vendor-extension pattern: `SystemUIGoogle` / `SystemUIExt`
+
+Direct edits to `packages/SystemUI/src/...` create merge conflicts on every Lineage rebase. The cleaner pattern, originated by `SystemUIGoogle` and used by several custom ROMs, is to ship a separate `system_ext` module that subclasses `SystemUIApplication` and registers additional services through `config_systemUIServiceComponents`:
+
+```
+device/xiaomi/rosemary/                # or a vendor/ tree
+  system_ext/
+    SystemUIExt/
+      Android.bp           ← android_app target, name: "SystemUIExt"
+      src/...              ← your custom services
+      res/values/config.xml ← <string-array name="config_systemUIServiceComponents">
+                              extending the base set with your new components.
+```
+
+Combine with an RRO that overrides `config_systemUIServiceComponents` in the base SystemUI to include your extension. Upgrade to a new LineageOS branch becomes "rebuild your `SystemUIExt`" rather than "resolve 200 merge conflicts in SystemUI."
+
+## ROM-Adjacent UI Customization
+
+### PixelPropsUtils and Play Integrity
+
+Outside the strict "UI customization" scope but ubiquitous in custom ROM forks: `PixelPropsUtils` is a small framework patch (lives in `frameworks/base/core/java/com/android/internal/util/<rom>/PixelPropsUtils.java` in most forks) that spoofs `Build.FINGERPRINT` / `ro.product.*` props per-process to satisfy Play Integrity device attestation and unlock features gated on Pixel hardware (e.g., Google Photos' unlimited backups, exclusive wallpapers).
+
+LineageOS's official position: **they don't ship it.** The doc at [lineageos.org/PlayIntegrity](https://lineageos.org/PlayIntegrity/) explains why and points users at out-of-tree solutions:
+
+*   **PlayIntegrityFix / PlayIntegrityFork** — Magisk/KernelSU modules that spoof fingerprints at the prop level; updated frequently as Google rolls fingerprints out of the trusted set.
+*   **TrickyStore** — KernelSU/APatch module that intercepts `keystore2` attestation calls and returns synthesized attestation that passes hardware-backed verification.
+
+If you're shipping a LineageOS-derivative ROM and want Play Integrity to pass out of the box, the path is patching `PixelPropsUtils` into your framework, *not* bundling a Magisk module — Lineage proper rejects this on policy grounds, but downstream forks routinely do it.
 
 ## Build, Flash, and Debug Considerations
 
