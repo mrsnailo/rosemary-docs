@@ -116,6 +116,7 @@ This is a high-level overview. Each step requires careful execution and troubles
     # First-sync optimization: skip historical refs and stale projects to save tens of GB.
     repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j$(nproc --all)
     ```
+    > **Note:** if you ever `repo init` to a *different* branch in an existing tree (e.g., upgrading lineage-21 → lineage-23.2), add `--force-sync` to the `repo sync` line. Without it, projects whose HEAD has moved fail with `Cannot fetch ... cannot overwrite a local work tree`. `--force-sync` is safe when you have no uncommitted local changes (which is the normal case in a build-only tree).
 2.  **Set up the device tree and dependencies in one shot** with the LineageOS `breakfast` helper. This reads `lineage.dependencies` from the rosemary device tree and clones device/kernel/HAL/sepolicy repos automatically via `roomservice.xml` — so you don't have to do section 2's clones by hand.
     ```bash
     source build/envsetup.sh
