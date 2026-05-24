@@ -327,10 +327,25 @@ fastboot getvar product        # → product: rosemary  (or rosemary_p / secret 
 # (2) Disable AVB verification. Required because the build is signed with AOSP
 #     test-keys, not your phone's OEM root. Without this you get "your device is
 #     corrupt" at every boot. Flash to BOTH slots on this A/B device.
-fastboot --disable-verity --disable-verification flash vbmeta_a   vbmeta.img
-fastboot --disable-verity --disable-verification flash vbmeta_b   vbmeta.img
-fastboot --disable-verity --disable-verification flash vbmeta_system_a vbmeta_system.img
-fastboot --disable-verity --disable-verification flash vbmeta_system_b vbmeta_system.img
+#
+#     IMPORTANT — fastboot 37 regression: the old one-liner form
+#     `fastboot --disable-verity --disable-verification flash vbmeta_a vbmeta.img`
+#     now fails with `fastboot: error: Failed to find AVB_MAGIC at offset: 0`
+#     even when the vbmeta.img is valid (confirmed against fastboot 37.0.0-14910828,
+#     verified hash, AVB0 magic present at offset 0). The flag-form parser regressed
+#     somewhere between platform-tools 33 and 37 and can no longer modify the
+#     in-memory image before flashing. Use the two-step form below instead — flash
+#     plain, then issue `disable-verity` and `disable-verification` as standalone
+#     fastboot commands (these set the disable bits via the bootloader directly,
+#     no image parsing needed; rosemary's MTK bootloader supports both).
+fastboot flash vbmeta_a        vbmeta.img
+fastboot flash vbmeta_b        vbmeta.img
+fastboot flash vbmeta_system_a vbmeta_system.img
+fastboot flash vbmeta_system_b vbmeta_system.img
+fastboot flash vbmeta_vendor_a vbmeta_vendor.img
+fastboot flash vbmeta_vendor_b vbmeta_vendor.img
+fastboot disable-verity
+fastboot disable-verification
 
 # (3) Flash boot.img (which IS the LineageOS recovery — BOARD_USES_RECOVERY_AS_BOOT=true).
 fastboot flash boot_a boot.img
