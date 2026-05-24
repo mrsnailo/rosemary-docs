@@ -1,0 +1,16 @@
+diff --git a/lineage_rosemary.mk b/lineage_rosemary.mk
+index 8a4f1e4..7e9367d 100644
+--- a/lineage_rosemary.mk
++++ b/lineage_rosemary.mk
+@@ -14,6 +14,11 @@ $(call inherit-product, device/xiaomi/rosemary/device.mk)
+ # Inherit some common LineageOS stuff.
+ $(call inherit-product, vendor/lineage/config/common_full_phone.mk)
+ 
++# Bake in MindTheGapps (local-only modification; not part of upstream device
++# tree — see ~/work/rosemary/patches/lineage-23.2/device/xiaomi/rosemary/0001-bake-in-mindthegapps.patch).
++$(call inherit-product-if-exists, vendor/gapps/common/common-vendor.mk)
++$(call inherit-product-if-exists, vendor/gapps/arm64/arm64-vendor.mk)
++
+ PRODUCT_NAME := lineage_rosemary
+ PRODUCT_DEVICE := rosemary
+ PRODUCT_MANUFACTURER := Xiaomi

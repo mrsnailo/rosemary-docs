@@ -1,0 +1,21 @@
+diff --git a/extract_utils/extract.py b/extract_utils/extract.py
+index 676b322..bcbc59f 100644
+--- a/extract_utils/extract.py
++++ b/extract_utils/extract.py
+@@ -505,7 +505,16 @@ def _move_files(dump_dir: str, files: List[File]):
+             if not file_path:
+                 continue
+ 
++            # If the file is already at dump_dir root (e.g. we just moved it
++            # on the previous iteration when src == dst), there is nothing
++            # to do — shutil.move would otherwise raise "Destination path
++            # already exists". This guard is the local fix for the bug that
++            # blocks fastboot-tgz extraction on rosemary lineage-23.2.
++            if path.dirname(file_path) == path.normpath(dump_dir):
++                break
++
+             shutil.move(file_path, dump_dir)
++            break
+ 
+ 
+ def move_firmware_files(dump_dir: str, ctx: ExtractCtx):
