@@ -1,0 +1,23 @@
+// Imports the Gradle-built Fossify Gallery + OCR fork as a prebuilt
+// system app on rosemary. Staged into place by ../install-gallery.sh,
+// which copies this file and the APK into
+// $ANDROID_BUILD_TOP/packages/apps/RosemaryGallery/.
+//
+// `presigned: true` keeps the debug-keystore signature embedded in the
+// APK rather than re-signing with the platform cert; this app does not
+// need signature-protected platform APIs.
+//
+// `overrides` suppresses LineageOS's stock Gallery2 so the home screen
+// doesn't end up with two gallery apps.
+
+android_app_import {
+    name: "RosemaryGallery",
+    owner: "rosemary-rom",
+    apk: "RosemaryGallery.apk",
+    presigned: true,
+    privileged: false,
+    dex_preopt: {
+        enabled: false,
+    },
+    overrides: ["Gallery2", "Gallery"],
+}

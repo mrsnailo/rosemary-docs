@@ -15,7 +15,7 @@ Active tracking for ROM feature work. The "what to build" reference is [ROM_FEAT
 
 | ID  | Feature                                    | Phase | Status      | Next action                                | Notes |
 |-----|--------------------------------------------|-------|-------------|--------------------------------------------|-------|
-| F01 | Gallery with OCR                           | 5     | in-progress | Pick app base (SimpleGallery / Ente / HOS) | The "powerful tool" — first active item. |
+| F01 | Gallery with OCR                           | 5     | done        | —                                          | APK shipped + approved on device; ROM integration ready via `rom-integration/install-gallery.sh`. |
 | F02 | Status bar customization                   | 1     | planned     | Clone Lineage `SystemUI` baseline          | Foundation. Many sub-options. |
 | F03 | Quick Settings panel customization         | 1     | planned     | Tile-host audit                            | Includes GIF QS header. |
 | F04 | Advanced power menu                        | 1     | planned     | GlobalActions audit                        | Recovery / Fastbootd / hot-reboot. |
@@ -80,5 +80,17 @@ Active tracking for ROM feature work. The "what to build" reference is [ROM_FEAT
 6. Smoke-build with `mka RosemaryGallery`, then full `brunch rosemary`, flash, test on device.
 
 **Done-when:** Photo of a printed page or street sign, taken on rosemary, becomes searchable by text content within ~2 s of opening Gallery. Long-press "Copy text" works on a screenshot. No regression on plain photo browsing.
+
+**Progress (2026-05-24):**
+- Fork: `~/work/rosemary-gallery/upstream/` on branch `ocr-search` (HEAD `e8db947`).
+- OCR module: `org.fossify.gallery.ocr.*` — Tesseract engine, Room+FTS4 DB, tessdata_fast language-pack installer (eng/hin/ben), `OcrIndexWorker`, `OcrExtractor` for on-demand, `OcrScheduler`. Search wired in `SearchActivity.textChanged()`.
+- **Hybrid UX shipped** — on-demand "Extract text" menu item in the photo viewer overflow (works without enabling the indexer). Auto-index is ON by default but scoped to Camera + Screenshots only via `ocr_index_all_folders=false`. Both flags live in `Config` but **no Settings UI yet** — defaults work out of the box; flipping them at runtime needs `adb shell` or a Settings page in a follow-up.
+- **Long-press → Extract text** (`22bc0e9`, fixed `e8db947`): long-tapping a still image in the photo viewer fires the same OCR pipeline as the overflow-menu item. First attempt used `setOnLongClickListener` which silently did nothing — both `SubsamplingScaleImageView` and `GestureImageView` fully consume `onTouchEvent` for pan/zoom, bypassing the View base class's long-press detector. Fix: install a `GestureDetector` inside the existing `setOnTouchListener` (already there for swipe-to-close) and use its `onLongPress` callback. Skipped MIUI-style in-image text-selection overlay — would require mapping Tesseract per-word bounding boxes through SubsamplingScaleImageView's pan/zoom matrix with a custom selection-touch view, multi-day work; the result-dialog with select-to-copy is the cheap substitute.
+- Build env: SDK installed via `curl` (sdkmanager 407s through the proxy); Gradle proxy creds in `~/.gradle/gradle.properties`.
+- Published builds (latest first):
+  - `gallery-ocr-28-foss-debug-20260524-longpress.apk` (same filename, republished after the GestureDetector fix) — SHA256 `d545e924e1b515b8b9b081f3a1590f28fd69ad9b94ad1a7865318ce50fe4e5a8`, 100 MB. `https://mrsnailo.duckdns.org/apps/gallery-ocr/20260524/gallery-ocr-28-foss-debug-20260524-longpress.apk`
+  - `gallery-ocr-28-foss-debug-20260524-hybrid.apk` — overflow-menu-only trigger; superseded.
+- **ROM integration wired** — `rom-integration/gallery/Android.bp` + `rom-integration/install-gallery.sh` stage the APK as a `/system/app/` prebuilt via `android_app_import`, and inject `PRODUCT_PACKAGES += RosemaryGallery` into `device/xiaomi/rosemary/lineage_rosemary.mk` behind a marker so it survives `repo sync` (re-run script to re-apply). Overrides Lineage's stock `Gallery2`. Smoke-tested 2026-05-24 against a stub tree: first run stages + appends, second run is a no-op. Will fire automatically on the next `brunch rosemary` once the LineageOS tree is up.
+- **Still to do (non-blocking):** Settings UI for the two prefs; ABI splits to slim 100 MB → ~40 MB for arm64-v8a only; per-app battery whitelist nag for MIUI users.
 
 ---
